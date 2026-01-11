@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
 
 env:
-  REPO_URL: https://github.com/padavanonly/immortalwrt
-  REPO_BRANCH: master
+  REPO_URL: https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git
+  REPO_BRANCH: 25.12-dev
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
