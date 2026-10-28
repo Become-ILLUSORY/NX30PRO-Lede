@@ -171,8 +171,15 @@ jobs:
         echo "CPU $(nproc) 线程，用 $(($(nproc) * 3 / 2)) 线程编译"
         make -j$(($(nproc) * 3 / 2)) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        # 只取真正的机型选择行：排除 CONFIG_TARGET_DEVICE_PACKAGES_* 和
+        # CONFIG_TARGET_PER_DEVICE_ROOTFS（后者会被 ?.*DEVICE.* 误匹配）
+        DEV=$(grep -E '^CONFIG_TARGET_DEVICE_[A-Za-z0-9_]+_DEVICE_[A-Za-z0-9_.-]+=y$' .config \
+              | grep -v '_PACKAGES_' \
+              | sed -E 's/^CONFIG_TARGET_DEVICE_.*_DEVICE_(.*)=y$/\1/' \
+              | head -1)
+        [ -z "$DEV" ] && DEV="unknown"
+        echo "DEVICE_NAME=_${DEV}" >> $GITHUB_ENV
+        echo "机型: $DEV"
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
     - name: 编译结果自检
