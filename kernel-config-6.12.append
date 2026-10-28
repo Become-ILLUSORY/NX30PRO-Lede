@@ -1,0 +1,37 @@
+# ============================================================================
+# honk / daeuniverse eBPF 数据面需要的内核选项
+# ----------------------------------------------------------------------------
+# 追加到 target/linux/mediatek/filogic/config-6.12 的末尾
+#
+# 为什么不能写在 .config 里：
+#   include/kernel-defaults.mk 只把 .config 中的 CONFIG_KERNEL_* 转成内核
+#   CONFIG_*，而这些符号在 config/Config-kernel.in 里没有定义，
+#   `make defconfig` 会把它们当未知符号丢掉。
+#
+#   （CONFIG_KERNEL_DEBUG_INFO / DEBUG_INFO_BTF / CGROUPS / NETKIT
+#     在 Config-kernel.in 里有定义，已经写在 .config 里了，不用重复）
+#
+# 追加命令：
+#   cat kernel-config-6.12.append >> target/linux/mediatek/filogic/config-6.12
+# ============================================================================
+
+# --- BPF cgroup 钩子 ------------------------------------------------------
+# honk 的 eBPF 对象含 cgroup/connect4、connect6、sendmsg4、sendmsg6、
+# sock_create、sock_release 六个钩子（从 honk-core 内嵌对象节名实测）。
+# honk_tcp_passive 以 BPF link 挂到 cgroup2 root，缺了它 TCP 准入打不开。
+CONFIG_CGROUP_BPF=y
+
+# cgroup 上的 sock 关联数据，cgroup BPF 的 sock_addr 程序依赖它
+CONFIG_SOCK_CGROUP_DATA=y
+
+# BPF_MAP_TYPE_SOCKMAP 的 TCP 流解析（honk 的 sk_lookup + sockmap 路径）
+CONFIG_BPF_STREAM_PARSER=y
+
+# netkit 虚拟网卡：honk 优先用 netkit，内核不支持时回退 veth。
+# 有 BTF 时会由 KERNEL_NETKIT 自动打开，这里显式写上保证一致。
+CONFIG_NETKIT=y
+
+# --- 顺带保证（kmod 包会以 =m 打开，这里是双保险）------------------------
+CONFIG_BPF_SYSCALL=y
+CONFIG_BPF_JIT=y
+CONFIG_NET_CLS_ACT=y

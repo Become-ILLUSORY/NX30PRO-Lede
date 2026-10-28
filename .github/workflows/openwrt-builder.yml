@@ -1,12 +1,14 @@
-name: Build H3C-NX30PRO OpenWrt
+name: Build H3C-NX30PRO (chasey 25.12 + honk)
 
 on:
   repository_dispatch:
   workflow_dispatch:
 
 env:
-  REPO_URL: https://github.com/padavanonly/immortalwrt-mt798x-6.6.git
-  REPO_BRANCH: openwrt-24.10-6.6
+  # ── 源码树：chasey-dev/immortalwrt-mt798x-rebase，分支 25.12，内核 6.12 ──
+  REPO_URL: https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git
+  REPO_BRANCH: 25.12
+  # 本仓库不提供 feeds.conf.default → 沿用源码树自带的
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: H3C-NX30PRO.config
   DIY_P1_SH: diy-part1.sh
@@ -21,27 +23,22 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # 带 BTF 的全量编译约 3~5 小时，默认 6 小时够用
+    timeout-minutes: 360
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: 检查服务器配置
       run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo "云编译建议取消勾选Node.js及其相关插件！"
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU物理数量:$(cat /proc/cpuinfo| grep "physical id"| sort| uniq| wc -l)"
-        echo -e "CPU核心及版本信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
+        echo "--------------------------CPU 信息--------------------------"
+        echo "CPU 核心及版本：$(grep -m1 'model name' /proc/cpuinfo | cut -f2 -d:)"
+        echo "逻辑核心数：$(nproc)"
         echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息："
-        sudo lshw -short -C memory | grep GiB
-        echo -e "\n"
+        free -h
         echo "--------------------------硬盘信息--------------------------"
-        echo -e  "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l) \n"
-        echo "硬盘详情："
-        df -Th
+        df -hT /
 
     - name: 初始化编译环境
       env:
@@ -55,19 +52,38 @@ jobs:
         g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
         libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5 \
         libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm lrzsz mkisofs msmtp \
-        nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pip python3-ply \
+        nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply \
         python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
-        texinfo uglifyjs upx-ucl unzip wget xmlto xxd zlib1g-dev libfuse-dev python3-setuptools
+        texinfo uglifyjs upx-ucl unzip wget xmlto xxd zlib1g-dev libfuse-dev python3-setuptools \
+        dwarves
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
         sudo mkdir -p /mnt/workdir
         sudo chown $USER:$GROUPS /mnt/workdir
+        echo "pahole 版本（BTF 生成依赖）：$(pahole --version || echo '由源码树 tools/dwarves 自建')"
+
+    - name: ccache 缓存
+      uses: actions/cache@v4
+      with:
+        path: ~/.ccache
+        key: ccache-chasey-2512-${{ github.sha }}
+        restore-keys: |
+          ccache-chasey-2512-
+          ccache-chasey-
 
     - name: Clone source code
-      working-directory: ./
       run: |
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
+        cd openwrt
+        echo "内核版本：$(grep -m1 'KERNEL_PATCHVER' target/linux/mediatek/Makefile)"
+        echo "是否用 apk：$(grep -m1 -A1 'config USE_APK' config/Config-build.in | tail -1)"
+
+    - name: 应用内核配置片段（BTF / cgroup BPF）
+      run: |
+        cat kernel-config-6.12.append >> openwrt/target/linux/mediatek/filogic/config-6.12
+        echo "---- 追加后的尾部 ----"
+        tail -20 openwrt/target/linux/mediatek/filogic/config-6.12
 
     - name: Load custom feeds
       run: |
@@ -75,27 +91,75 @@ jobs:
         chmod +x $DIY_P1_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P1_SH
+        echo "---- 生效的 feeds ----"
+        cat feeds.conf.default
 
     - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a && rm -rf feeds/packages/net/xray-core && rm -rf tmp && ./scripts/feeds update -a
-
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
 
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
     - name: Load custom configuration
       run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        [ -e files ] && cp -r files openwrt/files
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
 
-    - name: Download package
-      id: package
+    - name: 生成配置（make defconfig）
       run: |
         cd openwrt
+        cp .config .config.requested
         make defconfig
+        echo "==== 请求 $(grep -c '^CONFIG_PACKAGE_.*=y$' .config.requested) 个包，defconfig 后 $(grep -c '^CONFIG_PACKAGE_.*=y$' .config) 个 ===="
+        echo "---- 被 defconfig 丢弃的包（应为空）----"
+        comm -23 \
+          <(grep '^CONFIG_PACKAGE_.*=y$' .config.requested | sort) \
+          <(grep '^CONFIG_PACKAGE_.*=y$' .config | sort) || true
+
+    - name: 关键配置门禁
+      run: |
+        cd openwrt
+        fail=0
+        check() {
+          if grep -qE "^$1=y$" .config; then
+            echo "  ✓ $2"
+          else
+            echo "::error::缺少关键配置 $1（$2）"
+            fail=1
+          fi
+        }
+        echo "==== 需求门禁 ===="
+        check CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_h3c_magic-nx30-pro-mtkuboot "机型 mtkuboot"
+        check CONFIG_KERNEL_DEBUG_INFO_BTF "honk 需要的内核 BTF"
+        check CONFIG_KERNEL_CGROUPS "honk 需要的 cgroups"
+        check CONFIG_KERNEL_NETKIT "honk 需要的 netkit"
+        check CONFIG_PACKAGE_kmod-veth "honk 依赖"
+        check CONFIG_PACKAGE_kmod-sched-core "honk 依赖"
+        check CONFIG_PACKAGE_kmod-sched-bpf "honk 依赖"
+        check CONFIG_PACKAGE_kmod-nft-core "honk 依赖"
+        check CONFIG_PACKAGE_kmod-nft-queue "honk 依赖"
+        check CONFIG_PACKAGE_kmod-nfnetlink-queue "honk 依赖"
+        check CONFIG_PACKAGE_kmod-nf-conntrack "honk 依赖"
+        check CONFIG_PACKAGE_kmod-warp "MTK WARP 加速驱动"
+        check CONFIG_PACKAGE_kmod-mediatek_hnat "HNAT 硬件加速"
+        check CONFIG_PACKAGE_kmod-zram "zram"
+        check CONFIG_PACKAGE_kmod-tcp-bbr "BBR"
+        check CONFIG_PACKAGE_natmap "natmap"
+        grep -qE '^CONFIG_WARP_CHIPSET="mt7981"$' .config || { echo "::error::WARP_CHIPSET 不是 mt7981"; fail=1; }
+        echo "  ✓ WARP_CHIPSET=mt7981"
+        grep -qE '^CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=1024$' .config || echo "::warning::squashfs 块大小不是 1024"
+        echo "==== zram 压缩器 ===="
+        grep -E '^CONFIG_(KERNEL_)?ZRAM_DEF_COMP' .config || echo "  (未设置，走默认 lzo-rle)"
+        [ $fail -eq 0 ] && echo "==== 门禁全部通过 ====" || exit 1
+
+    - name: Download package
+      run: |
+        cd openwrt
         make download -j$(($(nproc) * 3 / 2))
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -104,20 +168,29 @@ jobs:
       id: compile
       run: |
         cd openwrt
-        echo -e "CPU $(nproc) thread"
-        echo -e "$(($(nproc) * 3 / 2)) thread compile"
+        echo "CPU $(nproc) 线程，用 $(($(nproc) * 3 / 2)) 线程编译"
         make -j$(($(nproc) * 3 / 2)) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
+    - name: 编译结果自检
+      if: (!cancelled())
+      run: |
+        cd openwrt
+        echo "---- 产物 ----"
+        ls -la bin/targets/*/*/ 2>/dev/null | head -30
+        echo "---- zram/BTF 是否真编进去了 ----"
+        grep -E '^CONFIG_(KERNEL_)?ZRAM_DEF_COMP' .config || true
+        grep -E '^CONFIG_KERNEL_DEBUG_INFO_BTF' .config || true
+
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
 
     - name: Upload bin directory
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v4
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
@@ -133,29 +206,11 @@ jobs:
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware directory
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v4
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE }}
-
-    - name: Upload firmware to cowtransfer
-      id: cowtransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
-        echo "::warning file=cowtransfer.com::$(cat cowtransfer.log | grep https)"
-        echo "url=$(cat cowtransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to WeTransfer
-      id: wetransfer
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_WETRANSFER == 'true' && !cancelled()
-      run: |
-        curl -fsSL git.io/file-transfer | sh
-        ./transfer wet -s -p 16 --no-progress ${FIRMWARE} 2>&1 | tee wetransfer.log
-        echo "::warning file=wetransfer.com::$(cat wetransfer.log | grep https)"
-        echo "url=$(cat wetransfer.log | grep https | cut -f3 -d" ")" >> $GITHUB_OUTPUT
 
     - name: Generate release tag
       id: tag
@@ -163,8 +218,8 @@ jobs:
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
-        [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
+        echo "源码：chasey-dev/immortalwrt-mt798x-rebase @ 25.12（内核 6.12）" >> release.txt
+        echo "机型：H3C Magic NX30 Pro（MTK U-Boot layout）" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -182,12 +237,3 @@ jobs:
       with:
         retain_days: 1
         keep_minimum_runs: 3
-
-    - name: Remove old Releases
-      uses: ophub/delete-releases-workflows@main
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        delete_releases: true
-        releases_keep_latest: 3
-        delete_tags: true
-        gh_token: ${{ secrets.GITHUB_TOKEN }}

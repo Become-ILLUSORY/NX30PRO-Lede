@@ -1,0 +1,48 @@
+#!/bin/sh
+# ============================================================================
+# 把 zram 的运行时压缩算法设为 zstd
+# ----------------------------------------------------------------------------
+# 为什么需要这个文件：
+#   package/system/zram-swap/files/zram.init 里 zram_comp_algo() 的写法是
+#
+#       local zram_comp_algo="$( uci -q get system.@system[0].zram_comp_algo )"
+#       if [ -z "$zram_comp_algo" ]; then
+#               # default to lzo, which is always available
+#               zram_comp_algo="lzo"
+#       fi
+#
+#   也就是说：.config 里编进了 zstd 也没用，UCI 没设值时脚本仍然写 lzo。
+#   这个 uci-defaults 在首次启动时把值钉成 zstd。
+#
+# 放置位置（构建根目录下）：
+#   files/etc/uci-defaults/99-zram-zstd
+#
+# 说明：uci-defaults 执行成功后会自己删除（返回 0 时），属一次性初始化。
+# ============================================================================
+
+# 只在没设置过的时候写，避免覆盖用户手改
+if [ -z "$(uci -q get system.@system[0].zram_comp_algo)" ]; then
+	uci -q set system.@system[0].zram_comp_algo='zstd'
+fi
+
+# zram 大小保持脚本默认（RAM 的一半，256MB 机器约 117MB）。
+# 想固定成具体值就取消下面这行注释：
+# uci -q set system.@system[0].zram_size_mb='128'
+
+# zram 场景下 swappiness 调高更划算：换到 zram 比丢弃 page cache 便宜。
+# OpenWrt 默认 60，这里提到 100。两个核 1.3G，不建议再高。
+uci -q set system.@system[0].swappiness='100'
+
+uci -q commit system
+
+# ---------------------------------------------------------------------------
+# 可选：CPU 调频策略
+#   schedutil（默认）：按负载调频，省电，风扇 없는 无线路由更凉
+#   performance     ：钉死在最高频，降低唤醒延迟，对代理吞吐有小幅帮助，
+#                     但 MT7981 是无风扇设计，可能更容易撞温度墙
+# 想试 performance 就取消下面两行注释，然后 /etc/init.d/cpufreq restart
+# ---------------------------------------------------------------------------
+# uci -q set system.@system[0].governor='performance'
+# uci -q commit system
+
+exit 0
