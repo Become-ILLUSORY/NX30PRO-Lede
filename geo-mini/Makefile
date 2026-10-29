@@ -14,13 +14,16 @@
 #   geoip.dat    238,307 B  只含 CN + PRIVATE
 #   geosite.dat  704,703 B  只含 GEOLOCATION-CN / GEOLOCATION-!CN / CATEGORY-ADS-ALL
 #
-# 版本号 999999999999 是 12 位，必须 >= 官方的时间戳格式（如 202610050438），
-# 否则 apk 会认为官方包更新，把它覆盖掉。
+# 版本号必须大于官方的时间戳版本，否则 apk 会认为官方包更新并覆盖它。
+# 官方两个包的版本位数不同（实测）：
+#   v2ray-geoip    202610050438    12 位
+#   v2ray-geosite  20261009101206  14 位
+# apk 按数值比较，所以用 20 位最保险；12 位会被 geosite 判成 downgrade。
 
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=v2ray-geo-mini
-PKG_VERSION:=999999999999
+PKG_VERSION:=99999999999999999999
 PKG_RELEASE:=1
 
 PKG_LICENSE:=CC-BY-SA-4.0

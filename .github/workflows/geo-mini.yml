@@ -7,8 +7,8 @@ name: Build geo-mini packages
 # 固件本身不含 geo。刷机后先装这两个 apk，再装 honk：
 #   apk add --allow-untrusted v2ray-geoip-*.apk v2ray-geosite-*.apk
 #
-# 版本号用 999999999999（12 位）。官方包版本是时间戳格式（如 202610050438），
-# 只有 12 位以上的版本号才能压住它，否则 apk 会认为官方包更新而覆盖掉。
+# 版本号用 20 位。官方两个包的版本位数不同（实测 geoip 12 位、geosite 14 位），
+# apk 按数值比较，12 位版本号会让 geosite 被判成 downgrade 而被升回全量包。
 
 on:
   workflow_dispatch:
@@ -166,7 +166,7 @@ jobs:
 
         ### 说明
 
-        - 版本号 \`999999999999\`（12 位）高于官方的时间戳版本，\`apk upgrade\` 不会把它换回 24 MB 全量包。
+        - 版本号 \`99999999999999999999\`（20 位）高于官方的时间戳版本，\`apk upgrade\` 不会把它换回 24 MB 全量包。
         - 包里有真实数据而非空占位：honk 的 \`updatable()\` 要求 \`assets\` 非空，
           空文件会让自动更新和手动更新都失效（死锁）。
         - \`/usr/share/honk/\` 的软链由 honk 包自己创建，这里只装 \`/usr/share/v2ray/\`，避免文件冲突。
