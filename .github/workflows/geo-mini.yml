@@ -1,0 +1,184 @@
+name: Build geo-mini packages
+
+# 生成两个极简 geo 数据包，供 honk 满足依赖：
+#   v2ray-geoip    ~238 KB   只含 CN + PRIVATE
+#   v2ray-geosite  ~705 KB   只含 GEOLOCATION-CN / GEOLOCATION-!CN / CATEGORY-ADS-ALL
+#
+# 固件本身不含 geo。刷机后先装这两个 apk，再装 honk：
+#   apk add --allow-untrusted v2ray-geoip-*.apk v2ray-geosite-*.apk
+#
+# 版本号用 999999999999（12 位）。官方包版本是时间戳格式（如 202610050438），
+# 只有 12 位以上的版本号才能压住它，否则 apk 会认为官方包更新而覆盖掉。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'geo-mini/**'
+      - '.github/workflows/geo-mini.yml'
+
+env:
+  # 与固件同一 target 的 25.12.6 SDK；geo 数据是 PKGARCH:=all，产物通用
+  SDK_URL: https://downloads.openwrt.org/releases/25.12.6/targets/mediatek/filogic/openwrt-sdk-25.12.6-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+  SDK_FALLBACK_URL: https://mirrors.tuna.tsinghua.edu.cn/openwrt/releases/25.12.6/targets/mediatek/filogic/openwrt-sdk-25.12.6-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: 校验 geo 源文件
+      run: |
+        set -e
+        for f in geo-mini/files/geoip.dat geo-mini/files/geosite.dat; do
+          if [ ! -s "$f" ]; then
+            echo "::error::缺少 $f"
+            exit 1
+          fi
+          printf "  %-32s %8s B\n" "$f" "$(stat -c%s "$f")"
+        done
+        total=$(( $(stat -c%s geo-mini/files/geoip.dat) + $(stat -c%s geo-mini/files/geosite.dat) ))
+        echo "  合计 ${total} B（$(awk -v b=$total 'BEGIN{printf "%.3f", b/1048576}') MB）"
+        if [ "$total" -ge 1048576 ]; then
+          echo "::error::geo 数据超过 1 MB"
+          exit 1
+        fi
+        echo "✓ 低于 1 MB"
+
+    - name: 下载并解压 OpenWrt SDK
+      run: |
+        set -e
+        url="$SDK_URL"
+        if ! curl -fL --retry 3 --connect-timeout 20 -o sdk.tar.zst "$url"; then
+          echo "::warning::主源失败，改用镜像"
+          curl -fL --retry 3 --connect-timeout 20 -o sdk.tar.zst "$SDK_FALLBACK_URL"
+        fi
+        echo "SDK: $(stat -c%s sdk.tar.zst) B"
+        mkdir -p sdk
+        tar --zstd -C sdk -xf sdk.tar.zst
+        SDK_DIR=$(find sdk -mindepth 1 -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -1)
+        [ -n "$SDK_DIR" ] || { echo "::error::SDK 目录未找到"; exit 1; }
+        echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
+        echo "解压到: $SDK_DIR"
+
+    - name: 放入 geo 包
+      run: |
+        set -e
+        cp -a geo-mini "$SDK_DIR/package/v2ray-geo-mini"
+        echo "---- package/v2ray-geo-mini ----"
+        find "$SDK_DIR/package/v2ray-geo-mini" -type f -printf '  %p  %s B\n'
+
+    - name: 配置
+      run: |
+        set -e
+        cd "$SDK_DIR"
+        [ -f .config ] || cp defconfig .config
+        cat >> .config <<'EOF'
+        CONFIG_PACKAGE_v2ray-geoip=y
+        CONFIG_PACKAGE_v2ray-geosite=y
+        EOF
+        make defconfig
+        echo "---- 配置结果 ----"
+        grep -E "^CONFIG_PACKAGE_v2ray-geo" .config || {
+          echo "::error::defconfig 后找不到 v2ray-geoip/geosite，包可能没被识别"
+          exit 1
+        }
+
+    - name: 编译 geo 包
+      run: |
+        set -e
+        cd "$SDK_DIR"
+        make package/v2ray-geo-mini/compile V=s -j$(nproc) \
+          || make package/v2ray-geo-mini/compile V=s
+
+    - name: 收集产物
+      id: collect
+      run: |
+        set -e
+        cd "$SDK_DIR"
+        mkdir -p "$GITHUB_WORKSPACE/out"
+        find bin/packages -name 'v2ray-geo*.apk' -exec cp {} "$GITHUB_WORKSPACE/out/" \;
+        cd "$GITHUB_WORKSPACE/out"
+        echo "---- 产物 ----"
+        ls -la
+        n=$(ls -1 *.apk 2>/dev/null | wc -l)
+        if [ "$n" -lt 2 ]; then
+          echo "::error::只产出 $n 个 apk，应为 2 个"
+          exit 1
+        fi
+        # 每个都必须是 noarch
+        for f in *.apk; do
+          printf "  %-42s %8s B\n" "$f" "$(stat -c%s "$f")"
+        done
+        total=$(stat -c%s *.apk | awk '{s+=$1} END{print s}')
+        echo "合计 $total B（$(awk -v b=$total 'BEGIN{printf "%.3f", b/1048576}') MB）"
+        echo "TOTAL=$total" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传 artifact
+      uses: actions/upload-artifact@v4
+      if: steps.collect.outputs.status == 'success'
+      with:
+        name: geo-mini-apk
+        path: out/*.apk
+
+    - name: 发布到 Release
+      if: steps.collect.outputs.status == 'success'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -e
+        TAG="geo-mini-$(date +%Y.%m.%d-%H%M)"
+        cat > notes.md <<EOF
+        ## 极简 geo 数据包（honk 依赖）
+
+        固件不含 geo 数据。刷机后**先装这两个**，再装 honk。
+
+        | 文件 | 大小 |
+        |---|---|
+        | \`v2ray-geoip\` | 238 KB — 只含 CN + PRIVATE |
+        | \`v2ray-geosite\` | 705 KB — 只含 \`GEOLOCATION-CN\` / \`GEOLOCATION-!CN\` / \`CATEGORY-ADS-ALL\` |
+        | **合计** | **$(awk -v b=$TOTAL 'BEGIN{printf "%.3f", b/1048576}') MB** |
+
+        ### 安装
+
+        \`\`\`sh
+        apk add --allow-untrusted v2ray-geoip-*.apk v2ray-geosite-*.apk
+        \`\`\`
+
+        ### 说明
+
+        - 版本号 \`999999999999\`（12 位）高于官方的时间戳版本，\`apk upgrade\` 不会把它换回 24 MB 全量包。
+        - 包里有真实数据而非空占位：honk 的 \`updatable()\` 要求 \`assets\` 非空，
+          空文件会让自动更新和手动更新都失效（死锁）。
+        - \`/usr/share/honk/\` 的软链由 honk 包自己创建，这里只装 \`/usr/share/v2ray/\`，避免文件冲突。
+        - honk 会在此基础上按 \`assets.geodata\` 配置自动/手动更新到最新。
+        - 需要别的 geosite 分类（netflix / openai 等）时，改 \`geo-mini/files/geosite.dat\` 后重跑本工作流。
+        EOF
+        gh release create "$TAG" out/*.apk \
+          --title "geo-mini $TAG" \
+          --notes-file notes.md \
+          --repo "$GITHUB_REPOSITORY"
+        echo "✓ https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+
+    - name: 清理旧 Release（只留最近 3 个）
+      if: steps.collect.outputs.status == 'success'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+          --json tagName --jq '.[].tagName' \
+          | grep '^geo-mini-' | tail -n +4 | while read -r t; do
+            echo "删除旧 release: $t"
+            gh release delete "$t" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          done

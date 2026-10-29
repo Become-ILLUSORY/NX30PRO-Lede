@@ -227,6 +227,7 @@ jobs:
         touch release.txt
         echo "源码：chasey-dev/immortalwrt-mt798x-rebase @ 25.12（内核 6.12）" >> release.txt
         echo "机型：H3C Magic NX30 Pro（MTK U-Boot layout）" >> release.txt
+        echo "geo 小包见 geo-mini 工作流的产物" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release

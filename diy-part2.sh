@@ -3,39 +3,40 @@
 # diy-part2.sh —— feeds install 之后、make defconfig 之前执行
 # 当前工作目录是 openwrt/
 #
+# 本工作流不编译 geo：v2ray-geoip / v2ray-geosite 由独立的 geo-mini
+# 工作流产成两个小 apk，刷机后手动安装。这里只把 feed 的全量包摘掉，
+# 省得 make download 白拉 24 MB。
+#
 set -e
 
 echo "==================== DIY part 2 开始 ===================="
 
 # ---------------------------------------------------------------------------
-# 1) geoip 精简：22.18 MB 的全量 geoip.dat -> 0.23 MB 的 geoip-only-cn-private.dat
+# 1) 摘掉 feed 里的全量 geo 包
 #
-#    只保留 CN + PRIVATE 两个国家段（顶层条目 2 个 vs 全量 253 个）。
-#    固件压缩后约省 4 MB。
+#    v2ray-geodata 的 Build/Prepare 会下载 geoip.dat(22 MB) + dlc.dat(2.4 MB)。
+#    本固件不需要它们（geo 由 geo-mini 工作流单独产出），直接移除以省带宽。
 #
-#    注意：精简版没有别的国家段。如果你的规则里写了 GEOIP,US / GEOIP,JP
-#          之类的，需要把这里注释掉。
+#    对应的 .config 里：
+#      # CONFIG_PACKAGE_v2ray-geoip is not set
+#      # CONFIG_PACKAGE_v2ray-geosite is not set
 # ---------------------------------------------------------------------------
-GEO_MK="feeds/packages/net/v2ray-geodata/Makefile"
-if [ -f "$GEO_MK" ]; then
-	echo "---- 应用 geoip 精简补丁 ----"
-	cp "$GEO_MK" "$GEO_MK.orig"
-	sed -i 's|^GEOIP_FILE:=geoip\.dat\.\$(GEOIP_VER)$|GEOIP_FILE:=geoip-cn.dat.$(GEOIP_VER)|' "$GEO_MK"
-	sed -i 's|^  URL_FILE:=geoip\.dat$|  URL_FILE:=geoip-only-cn-private.dat|' "$GEO_MK"
-	sed -i 's|^  HASH:=4ff4b2ec242a9e87b296ba27ddb85f8311e8d3e071eaebac5be9231c60e408dd$|  HASH:=989cc8badc2ea6f7f1c1a2e70dbfd944658579c35589c07b4feff77421316c72|' "$GEO_MK"
+GEO_FEED_DIR="feeds/packages/net/v2ray-geodata"
+GEO_LINK_DIR="package/feeds/packages/v2ray-geodata"
 
-	if grep -q "geoip-only-cn-private.dat" "$GEO_MK" && \
-	   grep -q "989cc8badc2ea6f7f1c1a2e70dbfd944658579c35589c07b4feff77421316c72" "$GEO_MK"; then
-		echo "  ✓ geoip 已改为精简版"
-		grep -nE "GEOIP_FILE|URL_FILE|HASH" "$GEO_MK" | head -4
-	else
-		echo "  ✗ 补丁未生效，回滚"
-		cp "$GEO_MK.orig" "$GEO_MK"
-		exit 1
-	fi
+if [ -d "$GEO_FEED_DIR" ] || [ -e "$GEO_LINK_DIR" ]; then
+	rm -rf "$GEO_LINK_DIR" "$GEO_FEED_DIR"
+	echo "  已移除 feed 的 v2ray-geodata（本固件不含 geo）"
 else
-	echo "  ! 未找到 $GEO_MK，跳过 geoip 精简"
+	echo "  feed 里没有 v2ray-geodata，跳过"
 fi
+
+for pkg in v2ray-geoip v2ray-geosite; do
+	sed -i "/^CONFIG_PACKAGE_${pkg}=y$/d" .config
+	grep -qE "^# CONFIG_PACKAGE_${pkg} is not set$" .config || \
+		echo "# CONFIG_PACKAGE_${pkg} is not set" >> .config
+done
+echo "  v2ray-geoip / v2ray-geosite → is not set"
 
 # ---------------------------------------------------------------------------
 # 2) 打开 ccache（配合 actions/cache，重复编译快很多）
