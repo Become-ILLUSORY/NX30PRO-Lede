@@ -78,17 +78,26 @@ jobs:
 
     - name: 配置
       run: |
-        set -e
         cd "$SDK_DIR"
-        [ -f .config ] || cp defconfig .config
-        cat >> .config <<'EOF'
-        CONFIG_PACKAGE_v2ray-geoip=y
-        CONFIG_PACKAGE_v2ray-geosite=y
-        EOF
+        echo "---- SDK 根目录 ----"
+        ls -1 | head -20
+        echo "---- 是否存在 defconfig 模板 ----"
+        ls -la defconfig 2>/dev/null || echo "  （没有，由 kconfig 生成）"
+
+        # SDK 不带 .config 模板，让 kconfig 用默认值先生成一份
+        make defconfig || true
+        [ -f .config ] || { echo "::error::make defconfig 未生成 .config"; exit 1; }
+
+        # 打开两个包，再让 kconfig 处理一次依赖
+        sed -i '/^CONFIG_PACKAGE_v2ray-geoip/d;/^CONFIG_PACKAGE_v2ray-geosite/d' .config
+        printf 'CONFIG_PACKAGE_v2ray-geoip=y\nCONFIG_PACKAGE_v2ray-geosite=y\n' >> .config
         make defconfig
+
         echo "---- 配置结果 ----"
         grep -E "^CONFIG_PACKAGE_v2ray-geo" .config || {
           echo "::error::defconfig 后找不到 v2ray-geoip/geosite，包可能没被识别"
+          echo "---- 包是否被扫描到 ----"
+          grep -rl "v2ray-geoip" tmp/.config-package.in 2>/dev/null | head -3 || echo "  未出现在 .config-package.in"
           exit 1
         }
 
